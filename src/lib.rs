@@ -217,10 +217,7 @@ fn lexical(value: StructuredValue, delimiter: char) -> Result<String, ContractEr
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn stream(text: &str) -> Stream {
-        Stream::new(StreamId::new(1), text.as_bytes().to_vec(), None)
-    }
+    use path::fixture::stream;
 
     const ORDERS: &str = "id,customer,total\nA1,ACME,15.00\nA2,BOLT,0.99\n";
 
