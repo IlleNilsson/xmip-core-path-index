@@ -16,11 +16,11 @@
 //! opened with another. Quoting is the CSV contract's concern, not this one's:
 //! an index addresses positions, and a value is the text found there.
 
-use contract::{
+use path::{Path, PathCost, PathEngine};
+use sdk::contract::{
     ContractDescriptor, ContractError, ContractId, StructureReader, StructureWriter,
     StructuredValue,
 };
-use path::{Path, PathCost, PathEngine};
 use stream::Stream;
 use xcore::StreamId;
 
