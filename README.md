@@ -1,10 +1,12 @@
 # xmip-core-path-index
 
 The `index` path technology, a technology of
-[xmip-core-path](https://github.com/IlleNilsson/xmip-core-path). It carries the
-`PathEngine` for the language `index`, and the structure reader and writer that
-give the engine content to address. Promote reads through it, demote writes
-through it to produce a new Stream (ADR-0013), route and process read.
+[xmip-core-path](https://github.com/IlleNilsson/xmip-core-path). It carries
+`IndexLanguage`, the `PathLanguage` for the language `index`, fields split on
+the delimiter it is configured with: an index compiles once, a Stream's lines
+are found once per Message for every index reading it, and a write edits the
+text in place. Promote reads through it, demote writes through it to produce a
+new Stream (ADR-0013), route and process read.
 
 ## Toolchain
 

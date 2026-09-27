@@ -2,76 +2,66 @@
 
 //! The index path technology — a technology of `xmip-core-path`.
 //!
-//! Three things, because a path language is nothing without content to address:
-//! [`IndexEngine`], the [`PathEngine`] for the language `index`;
-//! [`DelimitedStructure`], a [`StructureReader`] over a delimited text Stream;
-//! and [`DelimitedRewrite`], a [`StructureWriter`] that produces a new Stream
-//! with one or more fields replaced, as ADR-0013 asks of anything that changes
-//! content. Promote reads through the first two; demote writes through the
-//! first and third; route and process read.
+//! [`IndexLanguage`] is the [`PathLanguage`] `index`: it compiles an index
+//! once, and the compiled index reads one field of a delimited text Stream
+//! and writes one into a rewrite of it (ADR-0013). Promote reads through it;
+//! demote writes through it; route and process read.
 //!
 //! An index is `record/field`, both counted from 1, or `field` alone for the
 //! first record: `3/2` is the second field of the third record. Records are
-//! lines; fields are split on the delimiter, comma unless the structure is
-//! opened with another. Quoting is the CSV contract's concern, not this one's:
-//! an index addresses positions, and a value is the text found there.
+//! lines; fields are split on the delimiter the language is configured with,
+//! comma unless another is given. Quoting is the CSV contract's concern, not
+//! this one's: an index addresses positions, and a value is the text found
+//! there. The lines of a Stream are found once per Message, however many
+//! indexes read it; the text is the Stream's own, never copied for a read.
 
-use contract::{
-    ContractDescriptor, ContractError, ContractId, StructureReader, StructureWriter,
-    StructuredValue,
-};
-use path::{Path, PathCost, PathEngine};
+use contract::ContractError;
+use path::{CompiledExpression, Content, Form, PathLanguage, Rewriting};
+use std::ops::Range;
 use stream::Stream;
-use xcore::StreamId;
+use xcore::ScalarValue;
 
-/// The `index` engine. The reader speaks indexes already, so the engine adds
-/// no traversal of its own.
-pub struct IndexEngine;
+/// The language `index`, splitting fields on one delimiter.
+pub struct IndexLanguage {
+    delimiter: char,
+}
 
-impl PathEngine for IndexEngine {
+impl IndexLanguage {
+    /// Fields split on `delimiter`.
+    #[must_use]
+    pub const fn new(delimiter: char) -> Self {
+        Self { delimiter }
+    }
+}
+
+/// Comma, as CSV has it.
+impl Default for IndexLanguage {
+    fn default() -> Self {
+        Self::new(',')
+    }
+}
+
+impl PathLanguage for IndexLanguage {
     fn language(&self) -> &'static str {
         "index"
     }
 
-    fn read(
-        &self,
-        reader: &dyn StructureReader,
-        path: &Path,
-    ) -> Result<Option<StructuredValue>, ContractError> {
-        reader.read(&path.expression)
-    }
-
-    fn write(
-        &self,
-        writer: &mut dyn StructureWriter,
-        path: &Path,
-        value: StructuredValue,
-    ) -> Result<(), ContractError> {
-        writer.write(&path.expression, value)
-    }
-
-    /// A field of the first record is at the front of the Stream; any other
-    /// record is a scan to reach, never a copy.
-    fn cost(&self, path: &Path) -> PathCost {
-        match record_and_field(&path.expression) {
-            Ok((1, _)) => PathCost::StreamPrefix,
-            _ => PathCost::StreamScan,
-        }
-    }
-}
-
-fn descriptor() -> ContractDescriptor {
-    ContractDescriptor {
-        id: ContractId("csv".to_string()),
-        version: "1".to_string(),
-        representation: "text/csv".to_string(),
+    fn compile(&self, expression: &str) -> Result<Box<dyn CompiledExpression>, ContractError> {
+        let (record, field) = record_and_field(expression)?;
+        Ok(Box::new(Compiled {
+            record,
+            field,
+            delimiter: self.delimiter,
+        }))
     }
 }
 
 /// `record/field` or `field`, both from 1.
 fn record_and_field(expression: &str) -> Result<(usize, usize), ContractError> {
-    let refuse = || ContractError {
-        message: format!("{expression:?} is not record/field or field, counted from 1"),
+    let refuse = || {
+        ContractError::new(format!(
+            "{expression:?} is not record/field or field, counted from 1"
+        ))
     };
     let (record, field) = match expression.split_once('/') {
         Some((record, field)) => (record.trim().parse().map_err(|_| refuse())?, field.trim()),
@@ -84,132 +74,84 @@ fn record_and_field(expression: &str) -> Result<(usize, usize), ContractError> {
     Ok((record, field))
 }
 
-fn records(stream: &Stream, delimiter: char) -> Result<Vec<Vec<String>>, ContractError> {
-    let text = std::str::from_utf8(stream.bytes()).map_err(|error| ContractError {
-        message: format!("not UTF-8 text: {error}"),
-    })?;
-    Ok(text
-        .lines()
-        .map(|line| line.strip_suffix('\r').unwrap_or(line))
-        .map(|line| line.split(delimiter).map(str::to_string).collect())
-        .collect())
+/// Where each line of `text` is, its line break left out.
+fn line_ranges(text: &str) -> impl Iterator<Item = Range<usize>> + '_ {
+    let mut start = 0;
+    text.split_inclusive('\n').map(move |line| {
+        let begin = start;
+        start += line.len();
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        let body = body.strip_suffix('\r').unwrap_or(body);
+        begin..begin + body.len()
+    })
 }
 
-/// A delimited text Stream, read by index.
-pub struct DelimitedStructure {
-    descriptor: ContractDescriptor,
-    records: Vec<Vec<String>>,
-}
+/// The lines of a text Stream, found once: where each is, not a copy of it.
+struct Lines(Vec<Range<usize>>);
 
-impl DelimitedStructure {
-    /// Split `stream` once on `delimiter`; every read is a lookup after that.
-    ///
-    /// # Errors
-    /// The Stream is not text.
-    pub fn parse(stream: &Stream, delimiter: char) -> Result<Self, ContractError> {
-        Ok(Self {
-            descriptor: descriptor(),
-            records: records(stream, delimiter)?,
-        })
+impl Form for Lines {
+    fn parse(stream: &Stream) -> Result<Self, ContractError> {
+        let text = stream
+            .text()
+            .map_err(|error| ContractError::new(format!("not UTF-8 text: {error}")))?;
+        Ok(Self(line_ranges(text).collect()))
     }
 }
 
-impl StructureReader for DelimitedStructure {
-    fn contract(&self) -> &ContractDescriptor {
-        &self.descriptor
-    }
-
-    fn read(&self, path: &str) -> Result<Option<StructuredValue>, ContractError> {
-        let (record, field) = record_and_field(path)?;
-        Ok(self
-            .records
-            .get(record - 1)
-            .and_then(|fields| fields.get(field - 1))
-            .map(|text| StructuredValue::Text(text.clone())))
-    }
-}
-
-/// A delimited text Stream being rewritten into a new one.
-pub struct DelimitedRewrite {
-    descriptor: ContractDescriptor,
-    id: StreamId,
+/// An index compiled.
+struct Compiled {
+    record: usize,
+    field: usize,
     delimiter: char,
-    records: Vec<Vec<String>>,
 }
 
-impl DelimitedRewrite {
-    /// Start from `stream`; the Stream `finish` produces carries `id`.
-    ///
-    /// # Errors
-    /// The Stream is not text.
-    pub fn of(stream: &Stream, delimiter: char, id: StreamId) -> Result<Self, ContractError> {
-        Ok(Self {
-            descriptor: descriptor(),
-            id,
-            delimiter,
-            records: records(stream, delimiter)?,
-        })
-    }
-}
-
-impl StructureWriter for DelimitedRewrite {
-    fn contract(&self) -> &ContractDescriptor {
-        &self.descriptor
+impl CompiledExpression for Compiled {
+    fn read(&self, content: &Content<'_>) -> Result<Option<ScalarValue>, ContractError> {
+        let lines = content.form::<Lines>()?;
+        let text = content.text()?;
+        Ok(lines
+            .0
+            .get(self.record - 1)
+            .and_then(|line| text[line.clone()].split(self.delimiter).nth(self.field - 1))
+            .map(|found| ScalarValue::Text(found.to_string())))
     }
 
     /// Replace one field. A record that does not exist is refused; a field
     /// past the end of an existing record is appended, padding with empties,
     /// because a delimited record has no declared width to violate.
-    fn write(&mut self, path: &str, value: StructuredValue) -> Result<(), ContractError> {
-        let (record, field) = record_and_field(path)?;
-        let text = lexical(value, self.delimiter)?;
-        let fields = self
-            .records
-            .get_mut(record - 1)
-            .ok_or_else(|| ContractError {
-                message: format!("record {record} does not exist"),
-            })?;
-        if fields.len() < field {
-            fields.resize(field, String::new());
+    fn write(&self, rewriting: &mut Rewriting, value: ScalarValue) -> Result<(), ContractError> {
+        let written = lexical(&value, self.delimiter)?;
+        let text = rewriting.form_mut::<String>()?;
+        let line = line_ranges(text)
+            .nth(self.record - 1)
+            .ok_or_else(|| ContractError::new(format!("record {} does not exist", self.record)))?;
+        let mut fields: Vec<&str> = text[line.clone()].split(self.delimiter).collect();
+        if fields.len() < self.field {
+            fields.resize(self.field, "");
         }
-        fields[field - 1] = text;
+        fields[self.field - 1] = &written;
+        let record = fields.join(self.delimiter.encode_utf8(&mut [0; 4]));
+        text.replace_range(line, &record);
         Ok(())
-    }
-
-    fn finish(self: Box<Self>) -> Result<Stream, ContractError> {
-        let mut text = String::new();
-        for fields in &self.records {
-            text.push_str(&fields.join(&self.delimiter.to_string()));
-            text.push('\n');
-        }
-        Ok(Stream::new(
-            self.id,
-            text.into_bytes(),
-            Some(self.descriptor.representation),
-        ))
     }
 }
 
-/// The text a value is written as. A value carrying the delimiter or a line
-/// break would change the record count for every reader after us, so it is
-/// refused rather than quoted: quoting is the CSV contract's dialect.
-fn lexical(value: StructuredValue, delimiter: char) -> Result<String, ContractError> {
+/// The text a value is written as; a Null is an empty field. A value
+/// carrying the delimiter or a line break would change the record count for
+/// every reader after us, so it is refused rather than quoted: quoting is the
+/// CSV contract's dialect.
+fn lexical(value: &ScalarValue, delimiter: char) -> Result<String, ContractError> {
     let text = match value {
-        StructuredValue::Null => String::new(),
-        StructuredValue::Bool(flag) => flag.to_string(),
-        StructuredValue::Integer(integer) => integer.to_string(),
-        StructuredValue::Decimal(decimal) => decimal.to_string(),
-        StructuredValue::Text(text) => text,
-        StructuredValue::Binary(_) => {
-            return Err(ContractError {
-                message: "binary has no text form here".to_string(),
-            });
-        }
+        ScalarValue::Null => String::new(),
+        other => other
+            .text()
+            .ok_or_else(|| ContractError::new("binary has no text form here"))?
+            .into_owned(),
     };
     if text.contains(delimiter) || text.contains(['\n', '\r']) {
-        return Err(ContractError {
-            message: format!("{text:?} would break the record it is written into"),
-        });
+        return Err(ContractError::new(format!(
+            "{text:?} would break the record it is written into"
+        )));
     }
     Ok(text)
 }
@@ -217,81 +159,64 @@ fn lexical(value: StructuredValue, delimiter: char) -> Result<String, ContractEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use path::fixture::stream;
+    use contract::fixture::stream;
+    use xcore::StreamId;
 
-    const ORDERS: &str = "id,customer,total\nA1,ACME,15.00\nA2,BOLT,0.99\n";
+    const ORDERS: &str = "id,customer,total\nA1,EXAMPLE,15.00\r\nA2,PARTNER-X,0.99\n";
+
+    fn compiled(index: &str) -> Result<Box<dyn CompiledExpression>, ContractError> {
+        IndexLanguage::default().compile(index)
+    }
 
     #[test]
     fn reads_by_record_and_field_from_one() {
-        let structure = DelimitedStructure::parse(&stream(ORDERS), ',').expect("parses");
-        let engine = IndexEngine;
-        let read = |p: &str| engine.read(&structure, &Path::new("index", p));
+        let orders = stream(ORDERS);
+        let content = Content::of(&orders);
+        let read = |p: &str| compiled(p)?.read(&content);
         assert_eq!(
             read("2").expect("reads"),
-            Some(StructuredValue::Text("customer".into()))
+            Some(ScalarValue::Text("customer".into()))
         );
         assert_eq!(
             read("2/3").expect("reads"),
-            Some(StructuredValue::Text("15.00".into()))
+            Some(ScalarValue::Text("15.00".into()))
         );
         assert_eq!(
             read("3/2").expect("reads"),
-            Some(StructuredValue::Text("BOLT".into()))
+            Some(ScalarValue::Text("PARTNER-X".into()))
         );
         assert_eq!(read("9/1").expect("reads"), None);
         assert_eq!(read("1/9").expect("reads"), None);
         assert!(read("0/1").is_err());
         assert!(read("a/b").is_err());
-    }
-
-    #[test]
-    fn the_first_record_is_a_prefix_and_the_rest_a_scan() {
-        let engine = IndexEngine;
+        let semicolons = stream("a;b\n");
         assert_eq!(
-            engine.cost(&Path::new("index", "1/2")),
-            PathCost::StreamPrefix
-        );
-        assert_eq!(
-            engine.cost(&Path::new("index", "2")),
-            PathCost::StreamPrefix
-        );
-        assert_eq!(
-            engine.cost(&Path::new("index", "7/2")),
-            PathCost::StreamScan
+            IndexLanguage::new(';')
+                .compile("2")
+                .expect("compiles")
+                .read(&Content::of(&semicolons))
+                .expect("reads"),
+            Some(ScalarValue::Text("b".into()))
         );
     }
 
     #[test]
     fn rewrites_a_field_into_a_new_stream() {
-        let mut rewrite =
-            DelimitedRewrite::of(&stream(ORDERS), ',', StreamId::new(2)).expect("parses");
-        let engine = IndexEngine;
-        engine
-            .write(
-                &mut rewrite,
-                &Path::new("index", "2/3"),
-                StructuredValue::Decimal(16.5),
-            )
-            .expect("writes");
-        engine
-            .write(
-                &mut rewrite,
-                &Path::new("index", "3/5"),
-                StructuredValue::Text("late".into()),
-            )
-            .expect("appends");
-        assert!(rewrite.write("9/1", StructuredValue::Null).is_err());
-        assert!(
-            rewrite
-                .write("1/1", StructuredValue::Text("a,b".into()))
-                .is_err()
-        );
-        let out = Box::new(rewrite).finish().expect("finishes");
+        let mut rewriting = Rewriting::of(&stream(ORDERS), StreamId::new(2));
+        let mut write =
+            |p: &str, v: ScalarValue| compiled(p).and_then(|c| c.write(&mut rewriting, v));
+        write("2/3", ScalarValue::Decimal(16.5)).expect("writes");
+        write("3/5", ScalarValue::Text("late".into())).expect("appends");
+        write("1/1", ScalarValue::Null).expect("empties");
+        assert!(write("9/1", ScalarValue::Null).is_err());
+        assert!(write("1/1", ScalarValue::Text("a,b".into())).is_err());
+        assert!(write("1/1", ScalarValue::Binary(vec![1])).is_err());
+        let out = rewriting.finish().expect("finishes");
         assert_eq!(out.id(), StreamId::new(2));
         let text = std::str::from_utf8(out.bytes()).expect("text");
         assert_eq!(
             text,
-            "id,customer,total\nA1,ACME,16.5\nA2,BOLT,0.99,,late\n"
+            ",customer,total\nA1,EXAMPLE,16.5\r\nA2,PARTNER-X,0.99,,late\n"
         );
     }
 }
