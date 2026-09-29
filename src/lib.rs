@@ -162,7 +162,7 @@ mod tests {
     use contract::fixture::stream;
     use xcore::StreamId;
 
-    const ORDERS: &str = "id,customer,total\nA1,EXAMPLE,15.00\r\nA2,PARTNER-X,0.99\n";
+    const ORDERS: &str = "id,customer,total\nA1,EXAMPLE,15.00\r\nA2,PARTY-X,0.99\n";
 
     fn compiled(index: &str) -> Result<Box<dyn CompiledExpression>, ContractError> {
         IndexLanguage::default().compile(index)
@@ -183,7 +183,7 @@ mod tests {
         );
         assert_eq!(
             read("3/2").expect("reads"),
-            Some(ScalarValue::Text("PARTNER-X".into()))
+            Some(ScalarValue::Text("PARTY-X".into()))
         );
         assert_eq!(read("9/1").expect("reads"), None);
         assert_eq!(read("1/9").expect("reads"), None);
@@ -216,7 +216,7 @@ mod tests {
         let text = std::str::from_utf8(out.bytes()).expect("text");
         assert_eq!(
             text,
-            ",customer,total\nA1,EXAMPLE,16.5\r\nA2,PARTNER-X,0.99,,late\n"
+            ",customer,total\nA1,EXAMPLE,16.5\r\nA2,PARTY-X,0.99,,late\n"
         );
     }
 }
