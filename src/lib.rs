@@ -96,9 +96,7 @@ struct Lines(Vec<Range<usize>>);
 
 impl Form for Lines {
     fn parse(stream: &Stream) -> Result<Self, ContractError> {
-        let text = stream
-            .text()
-            .map_err(|error| ContractError::new(format!("not UTF-8 text: {error}")))?;
+        let text = path::text(stream)?;
         Ok(Self(line_ranges(text).collect()))
     }
 }
@@ -218,7 +216,7 @@ mod tests {
         assert!(write("1/1", ScalarValue::Binary(vec![1])).is_err());
         let out = rewriting.finish().expect("finishes");
         assert_eq!(out.id(), StreamId::new(2));
-        let text = std::str::from_utf8(out.bytes()).expect("text");
+        let text = std::str::from_utf8(out.load().expect("held")).expect("text");
         assert_eq!(
             text,
             ",customer,total\nA1,EXAMPLE,16.5\r\nA2,PARTY-X,0.99,,late\n"
