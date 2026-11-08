@@ -16,7 +16,7 @@
 //! indexes read it; the text is the Stream's own, never copied for a read.
 
 use contract::ContractError;
-use path::{CompiledExpression, Content, Form, PathLanguage, Rewriting};
+use path::{CompiledExpression, Content, Form, Namespaces, PathLanguage, Rewriting};
 use std::ops::Range;
 use stream::Stream;
 use xcore::ScalarValue;
@@ -46,7 +46,12 @@ impl PathLanguage for IndexLanguage {
         "index"
     }
 
-    fn compile(&self, expression: &str) -> Result<Box<dyn CompiledExpression>, ContractError> {
+    fn compile(
+        &self,
+        expression: &str,
+        namespaces: &Namespaces,
+    ) -> Result<Box<dyn CompiledExpression>, ContractError> {
+        namespaces.unused_by(self.language())?;
         let (record, field) = record_and_field(expression)?;
         Ok(Box::new(Compiled {
             record,
@@ -165,7 +170,7 @@ mod tests {
     const ORDERS: &str = "id,customer,total\nA1,EXAMPLE,15.00\r\nA2,PARTY-X,0.99\n";
 
     fn compiled(index: &str) -> Result<Box<dyn CompiledExpression>, ContractError> {
-        IndexLanguage::default().compile(index)
+        IndexLanguage::default().compile(index, &Namespaces::new())
     }
 
     #[test]
@@ -192,7 +197,7 @@ mod tests {
         let semicolons = stream("a;b\n");
         assert_eq!(
             IndexLanguage::new(';')
-                .compile("2")
+                .compile("2", &Namespaces::new())
                 .expect("compiles")
                 .read(&Content::of(&semicolons))
                 .expect("reads"),
