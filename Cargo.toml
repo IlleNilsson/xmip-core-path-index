@@ -16,14 +16,14 @@ path = "src/lib.rs"
 # reads and the rewriting it writes live in path; the error in contract; the
 # Stream whose lines are found once in stream. Standard library otherwise:
 # delimited text needs no parser.
-path = { package = "xmip-core-path", git = "https://github.com/IlleNilsson/xmip-core-path", branch = "main" }
-contract = { package = "xmip-core-contract", git = "https://github.com/IlleNilsson/xmip-core-contract", branch = "main" }
-stream = { package = "xmip-core-stream", git = "https://github.com/IlleNilsson/xmip-core-stream", branch = "main" }
-xcore = { package = "xmip-core", git = "https://github.com/IlleNilsson/xmip-core", branch = "main" }
+path = { workspace = true }
+contract = { workspace = true }
+stream = { workspace = true }
+xcore = { workspace = true }
 
 [dev-dependencies]
 # The Stream fixture, for the tests only (ADR-0044).
-contract = { package = "xmip-core-contract", git = "https://github.com/IlleNilsson/xmip-core-contract", branch = "main", features = ["test-support"] }
+contract = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true
